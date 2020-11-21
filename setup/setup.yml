@@ -1,0 +1,116 @@
+---
+
+- name: Setup Python
+  hosts: webserver
+  remote_user: ubuntu
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: install python3
+      raw: test -e /usr/bin/python3 || (apt -qqy update && apt install -y python3)
+      register: output
+      changed_when: output.stdout != "" 
+    - name: install python3-pip
+      raw: apt-get update -y && apt-get install -y python3-pip
+    
+- name: Setup Docker
+  hosts: webserver
+  become: true
+  roles:
+    - name: docker
+
+- name: Install docker-py
+  hosts: webserver
+  become: true
+  pre_tasks:
+    - raw: pip3 install docker-py
+
+- name: Install webserver nginx
+  hosts: webserver
+  become: true
+  tasks:
+    - name: Copying the code
+      copy:
+        src: ../website
+        dest: "/tmp"
+        directory_mode: yes
+    - name: Create webserver image
+      docker_image:
+        name: web
+        build:
+          pull: yes
+          path: /tmp/website
+          # Use as cache source for building myimage
+          args:
+            log_volume: /var/log/myapp
+            listen_port: 80
+        source: build
+        force_tag: yes
+    - name: start the new container (DEVELOPMENT)
+      docker_container:
+        name: web
+        image: web
+        state: started
+        restart: yes
+        volumes:
+           - /var/log/hello:/var/log/nginx
+        ports:
+           - "8080:80"
+    
+
+- name: nginx-prometheus-exporter
+  hosts: webserver
+  become: true
+  tasks:
+    - name: start nginx-prometheus-exporter container
+      docker_container:
+        name: nginx-prometheus-exporter
+        image: nginx/nginx-prometheus-exporter
+        state: started
+        restart: yes
+        env:
+          SCRAPE_URI: http://{{ ansible_ssh_host }}:8080/metrics
+          TELEMETRY_PATH: /prometheus
+          NGINX_RETRIES: "10"
+        ports:
+          - "9113:9113"  
+
+- name: prometheus
+  hosts: webserver
+  become: true
+  tasks:
+    - name: copy prometheus.yml
+      template:
+        src: ./prometheus/prometheus.yml.j2
+        dest: /etc/prometheus.yml
+        mode: 0644
+    - name: start prometheus container    
+      docker_container:
+        name: prometheus
+        image: prom/prometheus
+        state: started
+        restart: yes
+        ports:
+          - "9090:9090" 
+        volumes:
+          - "/etc/prometheus.yml:/etc/prometheus/prometheus.yml"
+
+- name: grafana
+  hosts: webserver
+  become: true
+  tasks:
+    - name: copy datasource.yml
+      template:
+        src: ./grafana/datasource.yaml.j2
+        dest: /etc/datasource.yml
+        mode: 0644
+    - name: start grafana container
+      docker_container:
+        name: grafana
+        image: grafana/grafana:6.5.0
+        state: started
+        restart: yes
+        ports:
+          - "3000:3000"    
+        volumes:
+           - "/etc/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml"
